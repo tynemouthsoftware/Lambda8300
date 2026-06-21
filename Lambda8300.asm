@@ -22,7 +22,7 @@
 ; $4004/05  RAMTOP  - Address of reserved area
 ; $4006     MODE    - Cursor mode
 ; $4007/08  PPC     - Line number being executed
-; $4009     VERSN   - Version = 0
+; $4009     VERSN   - Version (from tape $00 = ZX81, $FF = Lambda)
 ; $400A/0B  NXTLIN  - Address of next line to be executed (ZX81 has E.PPC here)
 ; $400C/0D  PRGRM   - Start of user program = $4396 (ZX81 has DFILE here)
 ; $400E/0F  DF.CC   - Display file current character
@@ -58,7 +58,8 @@
 ; $407D-$4395       - Display file
 ; $4396-RAMTOP      - User Program memory
 
-; no DFILE - Location of display file, that is hard coded at $407D
+; no DFILE variable - Location of display file, that is hard coded at $407D
+DFILE .equ 0407dh
 
 .org    00000h
 
@@ -69,10 +70,8 @@
 ; START
 l0000h:
     out (0fdh),a            ; turn off NMI
-l0002h:
     ld a,0bfh
     in a,(0feh)             ; keyboard read (hold down key for ROM at $2000?)
-l0006h:
     jr l0025h               ; Jump to START-3 via START-2
 
 ; -------------------
@@ -244,7 +243,7 @@ l006eh:
     halt                    ; sync with NMI
 
     out (0fdh),a            ; stop the NMI generator
-    jp (ix)                 ; forward to X (after top) or X
+    jp (ix)                 ; forward to R-IX-1 (after top) or R-IX-2
 
 
 ; ****************
@@ -286,20 +285,20 @@ L007bh:
     .byte    $24            ; 8
     .byte    $23            ; 7
     .byte    $22            ; 6
-    .byte    $35            ; P
 
+    .byte    $35            ; P
     .byte    $34            ; O
     .byte    $2E            ; I
     .byte    $3A            ; U
     .byte    $3E            ; Y
-    .byte    $76            ; NEWLINE
 
+    .byte    $76            ; NEWLINE
     .byte    $31            ; L
     .byte    $30            ; K
     .byte    $2F            ; J
     .byte    $2D            ; H
-    .byte    $00            ; SPACE
 
+    .byte    $00            ; SPACE
     .byte    $1B            ; .
     .byte    $32            ; M
     .byte    $33            ; N
@@ -513,7 +512,7 @@ l01f2h:
     .byte    $2E,$37        ; 0A = IR - Integer out of Range
     .byte    $2E,$2A        ; 0B = IE - Invalid Expression
     .byte    $27,$30        ; 0C = BK - BreaK
-    .byte    $33,$26        ; 0D = NA - no program NAme
+    .byte    $33,$26        ; 0D = NA - No program NAme
     .byte    $32,$2B        ; 0E = MF - Music Format incorrect
 
 ; the " IN " message
@@ -527,73 +526,81 @@ l0212h:
 
 ; LOAD/SAVE
 sub_0216h:
-    inc hl
-    ex de,hl
-    ld hl,(04014h)
-    scf
-    sbc hl,de
-    ex de,hl
-    ret nc
-    pop hl
+    inc hl                  ; Step destination
+    ex de,hl                ; Backup to DE
+    ld hl,(04014h)          ; Get E-LINE
+    scf                     ; Check if they match
+    sbc hl,de               ; Is the last byte the end of the file?
+    ex de,hl                ; Restore destination
+    ret nc                  ; return if the end has not been reached
+    pop hl                  ; drop the return address and continue
 ; ZX81 drops to SLOW here
 
-    inc (iy+009h)           ; check version
-    jr z,sub_0285h          ; skip if it was $FF
-    ld hl,(0400ch)          ; Start of user program ($4396) - Not DFILE
-    inc hl
-    ld (04010h),hl
-    ld hl,0407dh            ; Hard coded DFILE location
-    ld bc,00319h
-    call sub_0b30h          ; MAKE-ROOM
-    ex de,hl
+; LOAD/SAVE-COMPLETE
+l0221h:
+    inc (iy+009h)           ; increment version (from tape Lambda = $FF, ZX81 = $00. normal Lambda = $00, ZX81 = $01)
+    jr z,sub_0285h          ; if it was $FF, a Lambda program, go straight to FAST/SLOW
+
+; This code converts a ZX81 program to the Lambda 8300
+    ld hl,(0400ch)          ; Location of the ZX81 DFILE (loaded with program)
+    inc hl                  ; +1
+    ld (04010h),hl          ; Store this as
+    ld hl,DFILE             ; Hard coded DFILE location
+    ld bc,00319h            ; Length of DFILE + 1 extra blank row to make SCROLL a block copy
+    call sub_0b30h          ; MAKE-ROOM for BC bytes at location in HL
+    ex de,hl                ; HL is now at the program location
+; ZX81-CONV-1
 l0237h:
-    inc hl
+    inc hl                  ; Step through memory
     ld a,0c0h
-    and (hl)
+    and (hl)                ; Mask off the top two bits
     inc hl
     inc hl
     inc hl
-    jr z,l0248h
-    ld hl,04396h
-    jp l04ach
+    jr z,l0248h             ; If it was <$30, skip to ZX81-CONV-4
+    ld hl,04396h            ; Hard coded number we worked out before (start of program)
+    jp l04ach               ; Re-initialise after loading and clear screen etc.
 
-; this code appears to be checking through the code
-; Possibly handling loading ZX81 files (which it can do, but not the other way around)
-
+; ZX81-CONV-2
 l0246h:
-    add a,b
+    add a,b                 ; modify the command token from ZX81 to Lambda tokens
+
+; ZX81-CONV-3
 l0247h:
-    ld (hl),a
+    ld (hl),a               ; update the token in the copde
+
+; ZX81-CONV-4
 l0248h:
     inc hl                  ; step through program
     ld a,(hl)
     call sub_0955h          ; routine NUMBER
-    jr z,l0248h
-    cp 076h
-    jr z,l0237h
-    cp 0e1h
-    jr nc,l0248h
-    cp 040h
-    jr c,l0248h
+    jr z,l0248h             ; skip through numbers
+
+    cp 076h                 ; is it a newline?
+    jr z,l0237h             ; skip back for next line number
+    cp 0e1h                 ; is it a command over $E1?
+    jr nc,l0248h            ; continue scanning
+    cp 040h                 ; is it a number character below $40?
+    jr c,l0248h             ; continue scanning
     ld b,003h
-    cp 043h
-    jr c,l0246h
+    cp 043h                 ; is it a command below $43?
+    jr c,l0246h             ; add 3
     ld b,062h
-    cp 0deh
-    jr nc,l0246h
+    cp 0deh                 ; is it a command above $DE?
+    jr nc,l0246h            ; add $62
     ld b,0feh
-    cp 0d8h
-    jr nc,l0246h
+    cp 0d8h                 ; is it cpmmand $D8?
+    jr nc,l0246h            ; add $FE
     ld b,0fch
-    cp 0c4h
-    jr nc,l0246h
+    cp 0c4h                 ; is it above $C4?
+    jr nc,l0246h            ; add $FC
     ld b,013h
-    cp 0c1h
-    jr nc,l0246h
+    cp 0c1h                 ; is it above $C1?
+    jr nc,l0246h            ; add $13
     cp 0c0h
-    jr nz,l0248h
-    ld a,017h
-    jr l0247h               ; loop back
+    jr nz,l0248h            ; is it not $C0?
+    ld a,017h               ; replace with dummy command
+    jr l0247h               ; loop back to write the new value
 
 ; --------------------------
 ; THE 'SLOW' COMMAND ROUTINE
@@ -603,7 +610,7 @@ l0248h:
 sub_0281h:
     set 6,(iy+03bh)         ; Request slow mode ()
 
-; FAST/SLOW
+; SLOW/FAST
 sub_0285h:
     ld hl,0403bh            ; load the CDFLAG
     ld a,(hl)
@@ -725,7 +732,7 @@ l02f6h:
 
 ; R-IX-1 (timing altered)
     ld bc,01901h            ; B=25 lines, C=1 scanline
-    ld a,(l0000h)           ; wasting cycles
+    ld a,(00000h)           ; wasting cycles
     ld a,0f5h               ; Preset value to go into R to cause trigger at correct time
     call sub_0337h          ; DISPLAY-5, border complete, generate text display
     nop
@@ -862,24 +869,32 @@ l037dh:
 sub_037fh:
     call sub_0435h
     jr c,l037dh
-    ld (iy+009h),0ffh
+    ld (iy+009h),0ffh       ; Set version to $FF, indicating Lambda 8300 program
     ex de,hl
     ld de,012cbh            ; five seconds timing value
+
+; HEADER
 l038ch:
     call sub_113bh
     jr nc,l03bfh
+
+; DELAY-1
 l0391h:
     djnz l0391h
     dec de
     ld a,d
     or e
     jr nz,l038ch
+
+; OUT-NAME
 l0398h:
     call sub_03abh
     bit 7,(hl)
     inc hl
     jr z,l0398h
-    ld hl,04009h
+    ld hl,04009h            ; Set HL to first address to go, VERSN
+
+; OUT-PROG
 l03a3h:
     call sub_03abh
     call sub_0216h
@@ -936,13 +951,15 @@ l03c8h:
 
 ; LOAD
 sub_03cdh:
-    call sub_0435h
-    rl d
-    rrc d
+    call sub_0435h          ; Routine NAME
+                            ; DE points to start of name in RAM
+    rl d                    ; Pick up carry
+    rrc d                   ; Carry now in bit 7
+
 ; NEXT-PROG
 l03d4h:
-    call sub_03d9h
-    jr l03d4h
+    call sub_03d9h          ; routine IN-BYTE
+    jr l03d4h               ; loop to NEXT-PROG
 
 ; ------------------------
 ; THE 'IN-BYTE' SUBROUTINE
@@ -950,25 +967,25 @@ l03d4h:
 
 ; IN-BYTE
 sub_03d9h:
-    ld c,001h
+    ld c,001h               ; Byte counter
 
 ; NEXT-BIT
 l03dbh:
-    ld b,000h
+    ld b,000h               ; Loop 256 times
 
 ; BREAK-3
 l03ddh:
-    ld a,07fh
-    in a,(0feh)
-    out (0ffh),a
-    rra
-    jr nc,l042fh
-    rla
-    rla
-    jr c,l0412h
-    djnz l03ddh
-    pop af
-    cp d
+    ld a,07fh               ; Check the space key
+    in a,(0feh)             ;
+    out (0ffh),a            ; IO Write triggers VYsnc pulses on screen
+    rra                     ; check for space pressed (bit 0->Carry)
+    jr nc,l042fh            ; to BREAK-4 if so
+    rla                     ; Carry->bit 0
+    rla                     ; bit 7->Carry
+    jr c,l0412h             ; Forward to GET-BIT if there is data
+    djnz l03ddh             ; Loop back and keep checking
+    pop af                  ; Drop return address
+    cp d                    ; But A holds the value from port FE?
 
 ; RESTART
 l03eeh:
@@ -1033,9 +1050,9 @@ l0429h:
 
 ; BREAK-4
 l042fh:
-    ld a,d
-    and a
-    jr z,l03eeh
+    ld a,d                  ; Get D
+    and a                   ; Test it
+    jr z,l03eeh             ; If there has been data, then restart
 
 ; REPORT-D
 l0433h:
@@ -1118,7 +1135,7 @@ l046eh:
     ld (04006h),a           ; set mode
     ld bc,0bfffh            ; top of possible RAM, making max RAM 32K
     jr nc,l0489h            ; skip RAM test if key in column 0 held? autostart expansion ROM?
-    ld a,(0407dh)           ; check of there is a DFILE
+    ld a,(DFILE)            ; check of there is a DFILE
     cp 076h                 ; should start with a NL/HALT
     jr nz,l0489h            ; no DFILE, so do a cold start
     jr z,l04c0h             ; DFILE present, warm start, skip RAM test
@@ -1133,20 +1150,24 @@ sub_0481h:
     ld bc,(04004h)          ; RAMTOP top of detected / protected RAM
     dec bc
 
-; RAM check
+; -----------------------
+; THE 'RAM CHECK' ROUTINE
+; -----------------------
+
+; RAM-CHECK
 l0489h:
     ld h,b                  ; HL = BC = last byte to test
     ld l,c
     ld a,03fh               ; stop point, check RAM down to $4000
 
-; RAM fill
+; RAM-FILL
 l048dh:
     ld (hl),002h            ; write 2 to every address in RAM.
     dec hl
     cp h                    ; stop when H=A=$3F
     jr nz,l048dh
 
-; RAM read
+; RAM-READ
 l0493h:
     and a                   ; reset carry flag
     sbc hl,bc               ; Compare HL and BC
@@ -1159,9 +1180,15 @@ l0493h:
     dec (hl)                ; Decrement RAM
     jr z,l0493h             ; It was 2 previously, zero now, good RAM, keep checking
 
-; Set TOP
+; SET-TOP
 l04a0h:
     ld (04004h),hl          ; Set RAMTOP, top of usable RAM
+
+; ----------------------------------
+; THE 'DFILE INITIALIZATION' ROUTINE
+; ----------------------------------
+
+; INIT-DFILE
 l04a3h:
     ld hl,04397h            ; Set VARS, starts of variable area
     ld (04010h),hl          ; VARS = $4397 - fixed location after DFILE
@@ -1170,18 +1197,18 @@ l04a3h:
 l04ach:
     ld (0400ch),hl          ; Set PRGRM
 
-; Create expanded DFILE
+; CREATE-DFILE
     ld c,019h               ; 24 lines + 1 extra NL
     xor a                   ; A = 0 = Space
 
-; Next line
+; NEXT-LINE
 l04b2h:
     dec hl
     ld (hl),076h            ; start / end with newline / halt
     dec c                   ; line counter
     jr z,l04c0h             ; finished?
 
-; Fill line
+; FILL-LINE
     ld b,020h               ; fill line with 32 spaces
 l04bah:
     dec hl                  ; step backwards
@@ -1189,28 +1216,33 @@ l04bah:
     djnz l04bah             ; loop until done
     jr l04b2h               ; back for more
 
-; Set system variables
+; ----------------------------
+; THE 'INITIALIZATION' ROUTINE
+; ----------------------------
+
+; INITIAL
 l04c0h:
-    ld hl,(04004h)          ; RAMTOP
-    dec hl                  ; last system byte
-    ld (hl),03eh            ; end marker
-    dec hl
-    ld sp,hl                ; stack here
-    dec hl
-    dec hl
-    ld (04002h),hl          ; ERR_SP, address of top of GOSUB stack
+    ld hl,(04004h)          ; Get RAMTOP
+    dec hl                  ; Move to last system byte
+    ld (hl),03eh            ; Set GOSUB end marker
+    dec hl                  ; Move down again
+    ld sp,hl                ; Set stack here
+    dec hl                  ; Move to first location in stack
+    dec hl                  ;
+    ld (04002h),hl          ; Set error stack pointer ERR_SP
+    ; I register is setup here on ZX81, not used on the Lambda,
+    ; The character ROM is inside the ULA
     im 1                    ; Z80 interrupt mode 1
-    ld iy,04000h            ; start of SYS VARS
+    ld iy,04000h            ; Set IY to start of SYS VARS to make access easier
     ld (iy+03bh),040h       ; CDFLAG - compute and display mode requested
-    ld (iy+021h),019h       ; SPARE1 = $40?
-    xor a
+    ld (iy+021h),019h       ; Set TEMPO to 25 (25*3.94ms = ~ 100ms)
+    xor a                   ; Clear more flags
     ld (04019h),a           ; X_PTR_lo = 0
     ld (0402dh),a           ; FLAGX = 0
     ld (04001h),a           ; FLAGS = 0
     ld (0407ch),a           ; SPARE3 = 0
-    dec a
+    dec a                   ; A now $FF
     ld (04035h),a           ; FRAMES_lo = $FF
-l04ech:
     call sub_1692h          ; CLEAR
     call sub_0450h          ; MAKE-NOISE
     call sub_0285h          ; SLOW-FAST to set SLOW mode
@@ -1304,7 +1336,7 @@ l055bh:
     ld a,(hl)
     cp 07eh
     jr nz,l0568h
-    ld bc,l0006h
+    ld bc,00006h
     call sub_0bf5h          ; routine RECLAIM-2
     jr l055bh
 
@@ -1338,7 +1370,7 @@ l056dh:
 
 ; DISPLAY-6
 l058dh:
-    ld hl,l0000h            ; clear X.PTR   - Addess of character before syntax error
+    ld hl,00000h            ; clear X.PTR   - Addess of character before syntax error
     ld (04018h),hl          ;
     ld hl,0403bh            ; get CDFLAGS
     bit 7,(hl)              ; check FAST/SLOW mode
@@ -1712,7 +1744,7 @@ l073ah:
     dec bc
     ld (04007h),bc
     ld (iy+022h),002h
-    ld de,0407dh            ; Hard coded DFILE location
+    ld de,DFILE             ; Hard coded DFILE location
     jr l0770h
 
 ; N/L-INP
@@ -1990,7 +2022,7 @@ sub_08d4h:
     call sub_0b7ch
     ld d,097h
     jr z,l08e4h
-    ld de,l0000h
+    ld de,00000h
     rl e
 
 ; TEST-END
@@ -2312,19 +2344,22 @@ l0a2ah:
 
 ; COPY-NEXT
 l0a3ch:
-    ld c,(hl)
-    ld a,c
-    inc hl
-    cp 076h
-    jr z,l0a66h
-    push hl
-    out (0f6h),a            ; different to ZX81 from here
-    ld a,e
-    out (0f5h),a            ; I think it is reading the char ROM in the ULA
-    in a,(0f6h)
-    rl c
-    jr nc,l0a51h
-    xor 0ffh
+    ld c,(hl)               ; load character from screen or buffer
+    ld a,c                  ; save a copy in C for later test
+    inc hl                  ; update pointer for next time
+    cp 076h                 ; is this a newline?
+    jr z,l0a66h             ; forward to COPY-N/L if it is
+    push hl                 ; no NL, so preserve the counter
+; different to ZX81 from here
+    out (0f6h),a            ; write character code to $F6
+    ld a,e                  ; get byte offset (0-7)
+    out (0f5h),a            ; write byte offset to F5
+    in a,(0f6h)             ; read character data from ULA? (or custom printer?)
+    rl c                    ; test backup character code
+    jr nc,l0a51h            ; skip if bit 7 was not set
+    xor 0ffh                ; bit7 set, invert bits
+
+; back to ZX81 code from here
 l0a51h:
     ld c,a
     ld b,008h
@@ -2543,15 +2578,17 @@ sub_0b2dh:
 ; THE 'MAKE ROOM' SUBROUTINE
 ; --------------------------
 
+; Make room for DE bytes at HL
+
 ; MAKE-ROOM
 sub_0b30h:
-    push hl
-    call sub_10a0h
-    pop hl
-    call sub_0b3fh
-    ld hl,(0401ch)
-    ex de,hl
-    lddr
+    push hl                 ; Save HL
+    call sub_10a0h          ; Routine TEST-ROOM
+    pop hl                  ; Restore HL
+    call sub_0b3fh          ; Routine POINTERS
+    ld hl,(0401ch)          ; STKEND - End of calculator stack
+    ex de,hl                ; DE=STKEND, HL=Location of bytes to be moved, BC=number of bytes to move
+    lddr                    ; Move bytes
     ret
 
 ; -------------------------
@@ -2560,47 +2597,50 @@ sub_0b30h:
 
 ; POINTERS
 sub_0b3fh:
-    push af
-    push hl
+    push af                 ; Save the Carry from the result of TEST-ROM
+    push hl                 ; Save HL, the destination
     ld hl,0400ah            ; NXTLIN - Address of next line to be executed (ZX81 was $4029)
-    ld a,00ah
+    ld a,00ah               ; Number of pointers to test
 
 ; NEXT-PTR
 l0b46h:
     ld e,(hl)
     inc hl
     ld d,(hl)
-    ex (sp),hl
-    and a
-    sbc hl,de
-    add hl,de
-    ex (sp),hl
-    jr nc,l0b5ah
-    push de
+    ex (sp),hl              ; Get destination from stack
+    and a                   ; Clear carry flag
+    sbc hl,de               ; Subtract and restore to set flags
+    add hl,de               ;
+    ex (sp),hl              ; Restore destination to stack
+    jr nc,l0b5ah            ; skip to PTR-DONE if pointer below destination
+; pointer is after point of insertion, so update pointer
+    push de                 ; Save DE
     ex de,hl
-    add hl,bc
+    add hl,bc               ; move pointer up by BC bytes
     ex de,hl
-    ld (hl),d
+    ld (hl),d               ; Update the pointer
     dec hl
     ld (hl),e
     inc hl
-    pop de
+    pop de                  ; Restore DE
 
 ; PTR-DONE
 l0b5ah:
-    inc hl
-    dec a
-    jr nz,l0b46h
-    ex de,hl
-    pop de
+    inc hl                  ; Next pointer
+    dec a                   ; Reduce number of pointers left to test
+    jr nz,l0b46h            ; Back to NEXT-PTR if there are more to do
+
+; all pointers updated
+    ex de,hl                ; HL now contains the end of the space to add + overheads
+    pop de                  ; DE contains the location of the new space
     pop af
     and a
-    sbc hl,de
-    ld b,h
+    sbc hl,de               ; HL now contains the number of bytes required
+    ld b,h                  ; BC=HL
     ld c,l
-    inc bc
-    add hl,de
-    ex de,hl
+    inc bc                  ; +1
+    add hl,de               ; Add back
+    ex de,hl                ; Finally DE=End of space, HL=Start of space, BC=Size of space
     ret
 
 ; -----------------------------
@@ -2700,14 +2740,22 @@ sub_0ba9h:
     ex de,hl
     ret
 
-;?? SCROLL ??
-    ld hl,0409fh
-    ld de,0407eh
-    ld bc,l02f6h
-    ldir
-    ld b,(iy+022h)
-    inc b
-    jr l0bd2h
+; -------------------------------
+; THE 'SCROLL COMMAND' SUBROUTINE
+; -------------------------------
+
+; scrolling is easy with a fully expanded DFILE
+; copy lines 2-24 to 1-23
+
+; SCROLL
+sub_0bb1h:
+    ld hl,DFILE+022h        ; Source, start of line 2
+    ld de,DFILE+1           ; Destination, start of line 1
+    ld bc,l02f6h            ; 23*33-1, 23 lines to copy
+    ldir                    ; copy
+    ld b,(iy+022h)          ; get DF.SZ - Size of editor part of screen
+    inc b                   ; increase by 1 row
+    jr l0bd2h               ; routine B-LINES, clear the editor lines
 
 ; --------------------------
 ; THE 'LINE-ENDS' SUBROUTINE
@@ -3323,13 +3371,13 @@ l0e12h:
 ; P-SCROLL
 l0e18h:
     .byte    $00            ; Class-00 - No further operands.
-    .word    $0BB1          ; SCROLL
+    .word    sub_0bb1h      ; SCROLL
 
 ; P-PAUSE
 l0e1bh:
     .byte    $06            ; Class-06 - A numeric expression must follow.
     .byte    $00            ; Class-00 - No further operands.
-    .word    $10FE          ; PAUSE
+    .word    sub_10feh      ; PAUSE
 
 ; P-SLOW
 l0e1fh:
@@ -3802,7 +3850,7 @@ l0fdch:
     dec hl
     ld a,(hl)
     set 7,(hl)
-    ld bc,l0006h
+    ld bc,00006h
     add hl,bc
     rlca
     jr c,l0ffah
@@ -3997,7 +4045,7 @@ sub_1090h:
     push hl
     ld (04002h),sp
     call sub_1068h
-    ld bc,l0006h
+    ld bc,00006h
 
 ; --------------------------
 ; THE 'TEST ROOM' SUBROUTINE
@@ -4005,19 +4053,19 @@ sub_1090h:
 
 ; TEST-ROOM
 sub_10a0h:
-    ld hl,(0401ch)
-    add hl,bc
-    jr c,l10aeh
-    ex de,hl
-    ld hl,00024h
-    add hl,de
-    sbc hl,sp
-    ret c
+    ld hl,(0401ch)          ; Get STKEND - End of calculator stack
+    add hl,bc               ; Add the number of bytes space needed
+    jr c,l10aeh             ; to REPORT-4
+    ex de,hl                ; Save HL
+    ld hl,00024h            ; Safety margin past the end of stack?
+    add hl,de               ; Add this margin to the bytes required
+    sbc hl,sp               ; Subtract the she stack pointer from the new total
+    ret c                   ; Return with carry set if there is room, if not OM error
 
 ; REPORT-4
 l10aeh:
-    ld l,003h
-    jp l0059h
+    ld l,003h               ; Raise OM - Out of Memory
+    jp l0059h               ; to ERROR-3
 
 ; ----------------------------
 ; THE 'RETURN' COMMAND ROUTINE
@@ -4054,7 +4102,7 @@ sub_10c4h:
     res 6,(hl)
     ld a,(04001h)
     and 040h
-    ld bc,l0002h
+    ld bc,00002h
     jr nz,l10e0h
     ld c,004h
 l10e0h:
@@ -4078,36 +4126,50 @@ l10efh:
     ld (04030h),hl
     pop hl
     jp l0558h               ; routine LOWER
+
 l10fch:
     rst 08h                 ; ERROR-1
     .byte $07               ; II - Illegal Input
-    call sub_1088h
-    ld hl,0403bh
-    bit 7,(hl)
-    jr nz,l1116h
-    inc bc
-    ld (04034h),bc
-    call sub_0293h
+
+; ---------------------------
+; THE 'PAUSE' COMMAND ROUTINE
+; ---------------------------
+
+; PAUSE
+sub_10feh:
+    call sub_1088h          ; routine FIND-INT => BC
+    ld hl,0403bh            ; CDFLAG
+    bit 7,(hl)              ; check FAST mode
+    jr nz,l1116h            ; skip to PAUSE-3 if slow
+    inc bc                  ; Pause value++
+    ld (04034h),bc          ; Store this in the frame counter
+    call sub_0293h          ; Routine PRE-DISPLAY-1
+
+; PAUSE-2
 l1110h:
-    ld (iy+035h),0ffh
+    ld (iy+035h),0ffh       ; COORDS - Last point plotted?
     jr sub_1140h            ; routine DEBOUNCE
+
+; PAUSE-3
 l1116h:
-    ld a,b
+    ld a,b                  ; A = bit 7 of B
     and 080h
-    ld d,a
-    set 7,b
-    ld (04034h),bc
+    ld d,a                  ; D = old bit 7 of B
+    set 7,b                 ; Set bit 7, indicatin PAUSE mode
+    ld (04034h),bc          ; Alternate value in frame counter
+
+; PAUSE-4
 l1120h:
-    ld bc,(04034h)
-    res 7,b
-    ld a,b
-    or c
-    or d
-    jr z,l1110h
-    ld a,(hl)
-    rra
-    jr c,l1110h
-    jr l1120h
+    ld bc,(04034h)          ; Get frame counter
+    res 7,b                 ; ignore bit 7
+    ld a,b                  ; check if MSB
+    or c                    ; LSB
+    or d                    ; and old bit 7 are all zero (i.e. we have waited long enough)
+    jr z,l1110h             ; finished, back to PAUSE-2
+    ld a,(hl)               ; get CDFLAG
+    rra                     ; test bit 7 for fast mode
+    jr c,l1110h             ; finished, back to PAUSE-2
+    jr l1120h               ; loop back to PAUSE-4
 
 ; ---------------------------------
 ; THE 'BEEP' AND 'NOBEEP' FUNCTIONS
@@ -4301,7 +4363,7 @@ l11f4h:
 l11f7h:
     sub 0c0h
     jr c,l11f4h
-    ld bc,l04ech
+    ld bc,004ech
     cp 013h
     jr z,l1215h
     jr nc,l11f4h
@@ -4347,7 +4409,7 @@ l123ch:
     jr nz,l1264h
     call sub_16d1h
     rst 18h
-    ld bc,l0006h
+    ld bc,00006h
     call sub_0b30h          ; MAKE-ROOM
     inc hl
     ld (hl),07eh
@@ -4726,7 +4788,7 @@ l13e6h:
 
 ; SV-COUNT
 l13edh:
-    ld hl,l0000h
+    ld hl,00000h
 
 ; SV-LOOP
 l13f0h:
@@ -4833,7 +4895,7 @@ sub_1458h:
     xor a
     push af
     push bc
-    ld de,l0000h+1
+    ld de,00001h
     rst 18h
     pop hl
     cp 041h
@@ -4882,7 +4944,7 @@ l149ah:
     ex (sp),hl
     and a
     sbc hl,de
-    ld bc,l0000h
+    ld bc,00000h
     jr c,l14aeh
     inc hl
     and a
@@ -4993,7 +5055,7 @@ sub_14fah:
     ld b,010h
     ld a,h
     ld c,l
-    ld hl,l0000h
+    ld hl,00000h
 
 ; HL-LOOP
 l1506h:
@@ -5085,7 +5147,7 @@ l1556h:
 l1563h:
     bit 6,(iy+001h)         ; check FLAGS - 0 = string or 1 = numeric result
     jr z,l156fh
-    ld de,l0006h
+    ld de,00006h
     add hl,de
     jr l1556h
 
@@ -5258,7 +5320,7 @@ l161bh:
     set 7,c
     ld b,000h
     push bc
-    ld hl,l0000h+1
+    ld hl,00001h
     bit 6,c
     jr nz,l1629h
     ld l,005h
@@ -5833,7 +5895,7 @@ l180dh:
     ld (hl),a
     djnz l180dh
     inc hl
-    ld bc,l0008h
+    ld bc,00008h
     push hl
 
 ; PF-NULL
@@ -6108,7 +6170,7 @@ sub_192fh:
     ld d,a
     ld e,l
     exx
-    ld de,l0000h
+    ld de,00000h
     ret
 
 ; -------------------------
@@ -6922,7 +6984,7 @@ sub_1c39h:
 l1c44h:
     push af
     push de
-    ld de,l0000h
+    ld de,00000h
     call sub_1bf5h
     pop de
     pop af
@@ -7338,7 +7400,7 @@ sub_1d7ah:
 sub_1d84h:
     call sub_1083h          ; modified from ZX81 to inline REPORT-Bd
     push af
-    ld bc,l0000h+1
+    ld bc,00001h
     rst 30h
     pop af
     ld (de),a
@@ -7382,7 +7444,7 @@ sub_1d93h:
 
 ; str$
 sub_1dc4h:
-    ld bc,l0000h+1
+    ld bc,00001h
     rst 30h
     ld (hl),076h
     ld hl,(04039h)
